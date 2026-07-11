@@ -1,0 +1,185 @@
+/**
+** Program ini jalan di microcontroller Adafruit Feather M4 CAN.
+** Program mengirimkan rpm melalui pin analog A0
+** RPM didapatkan dengan menghitung jumlah pulsa selama satu interval (110 ms)
+** PulsaKiri akan bertambah jika gigi melewati led dari encoder.
+** Encoder dilengkapi roda gigi yang mempunyai 16 gigi.
+** Selanjutnya diukur rata-rata rpm dan dikirim lewat DAC 12bit
+**/
+#include <Wire.h> 
+// #include <ros.h>
+// #include <std_msgs/Float32.h>
+
+float EMA_ALPHA = 0.05;
+
+#define PIN_RPM_KIRI      10         // Pin 12 dari Adafruit
+#define PIN_RPM_KANAN     11         // Pin D2 mapped to pin GPI13 of ESP8266
+
+volatile int pulsaKiri=0;
+volatile int pulsaKanan=0;
+volatile unsigned long intervalTimeKiri = 0;
+volatile unsigned long previousInterruptTimeKiri = 0;
+volatile unsigned long intervalTimeKanan = 0;
+volatile unsigned long previousInterruptTimeKanan = 0;
+
+// Minumum and maximum values for 16-bit integers
+const int encoder_minimum = -512;
+const int encoder_maximum = 511;
+const int analog_pin1 = A0;
+const int analog_pin2 = A1;
+
+/**
+** Dihitung pulsa disebabkan gigi kiri melintas
+** selama lebih besar dari 5 microsecond dari perhitungan sebelumnya
+** untuk menghindari perhitungan derau setelah pulsa naik.
+**/
+void isr_pulsaKiri() {
+  previousInterruptTimeKiri = intervalTimeKiri;
+  intervalTimeKiri = micros();
+  if (intervalTimeKiri - previousInterruptTimeKiri > 5) { //0.05ms
+    if (pulsaKiri == encoder_maximum) {
+      pulsaKiri = encoder_minimum;
+    }
+    else {
+      pulsaKiri++;  
+    }      
+  }
+}
+ 
+/**
+** Dihitung pulsa yang disebabkan gigi kanan melintas
+** selama lebih besar dari 5 microsecond dari perhitungan sebelumnya
+** untuk menghindari perhitungan derau setelah pulsa naik.
+**/
+void isr_pulsaKanan() {
+  previousInterruptTimeKanan = intervalTimeKanan;
+  intervalTimeKanan = micros();
+  if (intervalTimeKanan - previousInterruptTimeKanan > 5) { //0.05ms
+    if (pulsaKanan == encoder_maximum) {
+      pulsaKanan = encoder_minimum;
+    }
+    
+    else {
+      pulsaKanan++;  
+    }      
+  }
+}
+
+//ROS publishers
+// ros::NodeHandle nh;
+// std_msgs::Float32 velocityenc_msg;
+
+// ros::Publisher velocityenc_pub("vehicle_velocity_enc", &velocityenc_msg);
+
+float r1_ema = 0.0, r2_ema = 0.0;
+
+int nilaiEMAKiri(int r1Baru){
+  r1_ema = EMA_ALPHA * r1Baru + (1.0 - EMA_ALPHA) * r1_ema;
+  return round (r1_ema);
+}
+
+int nilaiEMAKanan (int r2Baru) {
+  r2_ema = EMA_ALPHA * r2Baru + (1.0 - EMA_ALPHA) * r2_ema;
+  return round(r2_ema);
+}
+
+void setup() {
+  Serial.begin(57600);
+//  pinMode(analog_pin, OUTPUT);// Jangan sampai muncul ini. Jika dilakukan akan menghasilkan PWM
+  pinMode(PIN_RPM_KIRI, INPUT_PULLUP); 
+  attachInterrupt(digitalPinToInterrupt(PIN_RPM_KIRI), isr_pulsaKiri, RISING);
+  pinMode(PIN_RPM_KANAN, INPUT_PULLUP); 
+  attachInterrupt(digitalPinToInterrupt(PIN_RPM_KANAN), isr_pulsaKanan, RISING);
+  // nh.initNode();
+  // nh.advertise(velocityenc_pub);
+}
+
+unsigned long previousMillis = 0;
+const long interval = 5;           // interval at which to send value to analog pin
+
+void loop() {
+  int voltage = 0;
+  int vel = 0;
+  int maxRpm = 1700; 
+  float maxVel = 4.0;//(m/s)
+  int maxVelint =(int)maxVel;
+  int rpmKiri, rpmKanan, rpmRataRata, rpmKiriEMA,rpmKananEMA;
+  float wings = 16.0;
+  unsigned long currentMillis = millis();
+  if (currentMillis - previousMillis >= interval) {
+    noInterrupts();
+    rpmKiri = round(600.0 * pulsaKiri / wings);   //60*1000/interval * pulsaKiri / wings
+    rpmKanan = round(600.0 * pulsaKanan / wings); //60*1000/interval * pulsaKanan / wings
+    rpmRataRata = round((rpmKiri+rpmKanan)/2.0);
+//    voltage = map(rpmRataRata, 0, maxRpm, 0, 4095); //pengiriman lewat DAC 12bit
+//    sprintf(buffer,"kiri=%d, kanan=%d)", pulsaKiri, pulsaKanan);
+//    Serial.println(buffer);
+//    analogWrite(analog_pin, voltage);
+//    Serial.print("pulsa kiri: ");
+//    Serial.print(pulsaKiri);
+//    Serial.print(" | pulsa kanan: ");
+//    Serial.println(pulsaKanan);
+    pulsaKiri = 0; pulsaKanan = 0;
+    rpmKiriEMA = nilaiEMAKiri(rpmKiri);
+    rpmKananEMA = nilaiEMAKanan(rpmKanan);
+    Serial.print("rpm kiri: ");
+    Serial.print(rpmKiri);
+    Serial.print(" | rpm kanan: ");
+    Serial.print(rpmKanan);
+    Serial.print(" | rpm EMA kiri: ");
+    Serial.print(rpmKiriEMA);
+    Serial.print(" | rpm EMA kanan: ");
+    Serial.println(rpmKananEMA);
+    float v1 = rpmKiriEMA * 2.0 * 3.14 * 0.068 / 60.0;
+    float v2 = rpmKananEMA * 2.0 * 3.14 * 0.067 / 60.0;
+    float v = (v1 + v2) / 2.0; // (m/s)
+    float Voltv1 =v1*(3.3/maxVelint);//speed dalam bentuk volt
+    float vkeluaran1 =(Voltv1/3.3)*1023.00;//speed dalam bentuk byte
+    int vkeluaranint1 =(int) vkeluaran1;
+    float Voltv2 =v2*(3.3/maxVelint);//speed dalam bentuk volt
+    float vkeluaran2 =(Voltv2/3.3)*1023.00;//speed dalam bentuk byte
+    int vkeluaranint2 =(int) vkeluaran2;
+//    vel = map (vkeluaranint, 0, maxVelint, 0, 1023);
+//    vel = round(v / maxVel * 1023);
+    
+    analogWriteResolution(10);
+    analogWrite(analog_pin1, vkeluaranint1);
+    analogWrite(analog_pin2, vkeluaranint2);
+//    sprintf(buffer,"kiri=%d, kanan=%d, tengah=%d.", v1, v2, v); 
+//    Serial.println(buffer);
+    interrupts(); 
+//    float v1 = rpmKiriEMA * 2.0 * 3.14 * 0.068 / 60.0;
+//    float v2 = rpmKananEMA * 2.0 * 3.14 * 0.067 / 60.0;
+//    float v = (v1 + v2) / 2.0; // (m/s)
+//    float Voltv =v*(3.3/maxVelint);//speed dalam bentuk volt
+//    float vkeluaran =(Voltv/3.3)*1023.00;//speed dalam bentuk byte
+//    int vkeluaranint =(int) vkeluaran;
+//    vel = map (vkeluaranint, 0, maxVelint, 0, 4095);
+    // velocityenc_msg.data = v;
+    // velocityenc_pub.publish(&velocityenc_msg);
+    // nh.spinOnce();
+//    analogWriteResolution(10);
+//    analogWrite(analog_pin, vkeluaranint);
+    previousMillis = currentMillis;
+    Serial.print(currentMillis);
+    Serial.print(" | v1: ");
+    Serial.print(v1, 3);
+    Serial.print(" | v2: ");
+    Serial.print(v2, 3);
+    Serial.print(" | v: ");
+    Serial.print(v, 3);
+//    Serial.print(" | vel: ");
+//    Serial.print(vel, 3);
+    Serial.print(" | vVolt1: ");
+    Serial.print(Voltv1, 3);
+    Serial.print(" | vByte1: ");
+    Serial.print(vkeluaranint1, 1);
+    Serial.print(" | vVolt2: ");
+    Serial.print(Voltv2, 3);
+    Serial.print(" | vByte2: ");
+    Serial.println(vkeluaranint2, 1);
+//    Serial.print(" | velByte: ");
+//    Serial.println(vel, 1);
+    
+  }
+}
